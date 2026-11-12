@@ -1,0 +1,54 @@
+package MechaAmazing;
+
+import java.util.Map;
+
+/** Seventeen semantic body slots; connector indices can be customized.
+ * Fields are refreshed by update(), setPart(), replace(), and setParts().
+ * Treat them as read-only current views. Do not assign meshes to these fields;
+ * use setPart/replace so rest data, hierarchy and animation stay consistent.
+ * For a reference retained across frames, keep joint("leftHand"), then mesh().
+ * Inherits draw(float x,float y,float z) from MARig for draw-only offsets.
+ */
+public class MAHumanoidRig extends MARig {
+    public MAMesh groin, abs, chest, neck, head, leftUpperArm, leftLowerArm, leftHand, rightUpperArm, rightLowerArm, rightHand, leftThigh, leftCalf, leftFoot, rightThigh, rightCalf, rightFoot;
+    public MAHumanoidRig(){
+        super(1);
+        define("groin",null,-1);
+        define("abs","groin",0);
+        define("chest","abs",0);
+        define("neck","chest",0);
+        define("head","neck",0);
+        define("leftUpperArm","chest",1);
+        define("leftLowerArm","leftUpperArm",0);
+        define("leftHand","leftLowerArm",0);
+        define("rightUpperArm","chest",2);
+        define("rightLowerArm","rightUpperArm",0);
+        define("rightHand","rightLowerArm",0);
+        define("leftThigh","groin",1);
+        define("leftCalf","leftThigh",0);
+        define("leftFoot","leftCalf",0);
+        define("rightThigh","groin",2);
+        define("rightCalf","rightThigh",0);
+        define("rightFoot","rightCalf",0);
+    }
+    public MAHumanoidRig(Map<String,MAMesh> parts){this();setParts(parts);}
+    @Override protected void onUpdated(){
+        groin=mesh("groin");
+        abs=mesh("abs");
+        chest=mesh("chest");
+        neck=mesh("neck");
+        head=mesh("head");
+        leftUpperArm=mesh("leftUpperArm");
+        leftLowerArm=mesh("leftLowerArm");
+        leftHand=mesh("leftHand");
+        rightUpperArm=mesh("rightUpperArm");
+        rightLowerArm=mesh("rightLowerArm");
+        rightHand=mesh("rightHand");
+        leftThigh=mesh("leftThigh");
+        leftCalf=mesh("leftCalf");
+        leftFoot=mesh("leftFoot");
+        rightThigh=mesh("rightThigh");
+        rightCalf=mesh("rightCalf");
+        rightFoot=mesh("rightFoot");
+    }
+}
