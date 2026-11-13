@@ -33,6 +33,8 @@ public class MAHumanoidRig extends MARig {
     }
     public MAHumanoidRig(Map<String,MAMesh> parts){this();setParts(parts);}
     @Override public MAHumanoidRig setColor(int r,int g,int b,int a){super.setColor(r,g,b,a);return this;}
+    @Override public MAHumanoidRig setColor(String name,int r,int g,int b,int a){super.setColor(name,r,g,b,a);return this;}
+    @Override public MAHumanoidRig setTexture(String name,com.raylib.Raylib.Texture texture){super.setTexture(name,texture);return this;}
     @Override protected void onUpdated(){
         groin=mesh("groin");
         abs=mesh("abs");

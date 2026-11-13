@@ -12,7 +12,7 @@ A quick reference for MechaAmazing's public Java API, arranged by class with sho
 
 MechaAmazing builds articulated models from triangle meshes, pivot frames, and named joints. Pose and animation data are separate from geometry, so compatible rigs can share animations.
 
-**API reference:** optimized source based on GitHub commit `679a2f918bc1f2a5b7f368aff51f06c8a69ba588`, November 13, 2026. The supplied JAR targets Java 17 bytecode; your raylib binding and native dependencies must also be compatible with your Java runtime. Rendering uses `com.raylib.Raylib` and JavaCPP. These dependencies are not bundled in the MechaAmazing JAR.
+**API reference:** optional per-part materials based on GitHub commit `a373607ae016f357284658d45130a7d400bfbdee`, November 13, 2026. The supplied JAR targets Java 17 bytecode; your raylib binding and native dependencies must also be compatible with your Java runtime. Rendering uses `com.raylib.Raylib` and JavaCPP. These dependencies are not bundled in the MechaAmazing JAR.
 
 ```java
 import MechaAmazing.*;
@@ -30,7 +30,7 @@ import java.util.Vector;
 | [MAHumanoidRig](#mahumanoidrig--17-body-parts) | A predefined 17-part humanoid hierarchy. |
 | [MAPose](#mapose--joint-transform-snapshots) | Capture, apply, and blend a set of joint transforms. |
 | [MAAnimation](#maanimation--keyframes-and-playback) | Store, edit, and sample timed poses. |
-| [MAGpuRig](#magpurig--gpu-rendering) | Draw a posed rig in one GPU call; reuse uploads across offset draws. |
+| [MAGpuRig](#magpurig--gpu-rendering) | Draw texture batches; retain one GPU call for a shared texture and reuse uploads across offset draws. |
 | [MAMesh](#mamesh--geometry-and-attachments) | Store triangles, a root pivot, connectors, and child meshes. |
 | [MAMeshMath](#mameshmath--transforms-and-quaternions) | Transform copies of meshes and work with quaternions. |
 | [MAPivot](#mapivot--attachment-frames) | Store an attachment position and orientation. |
@@ -103,10 +103,14 @@ MARig motionUnit(float unit);                                    // Set positive
 float motionUnit();                                              // Read that length; default is 1.
 MARig resetPose();                                               // Reset all local rotations/offsets and update.
 MARig update();                                                  // Update changed joints and their descendants.
-MARig setColor(int r, int g, int b, int a);                       // Replace every part's RGBA; persistent across animation/replacement.
+MARig setColor(int r, int g, int b, int a);                       // Replace all RGBA; reset per-joint color overrides.
+MARig setColor(String name, int r, int g, int b, int a);            // Recolor one joint, including future replacements.
+MARig setTexture(String name, Texture texture);                   // Installed part only; null uses renderer fallback.
 
 void draw();                                                     // Submit the current rig through rlgl.
 void draw(float x, float y, float z);                              // Draw with an extra world offset; does not move the rig.
+void drawTextured(Texture fallback);                              // Per-part textures; manages its own rlgl blocks.
+void drawTextured(Texture fallback, float x, float y, float z);
 ```
 
 `MARig.Joint` exposes:
@@ -123,7 +127,7 @@ Define exactly one root with `parent == null`; use `-1` for its unused connector
 
 Rotation and translation calls set absolute offsets from rest; they do not accumulate each frame. `resetPose()` preserves world position, world orientation, and motion units. `setPart()`, `replace()`, `setParts()`, and `connector()` update immediately; transform setters queue changes.
 
-Treat returned meshes as rig-owned views. Change parts through `setPart()`/`replace()` and animate through rig methods. There is no rig copy constructor in this API: construct each character's rig separately from the source parts. Installation copies those parts, giving each rig independent pose state.
+Treat returned meshes as rig-owned views. Change parts through `setPart()`/`replace()`, change installed appearances through `setTexture(name, ...)`/`setColor(name, ...)`, and animate through rig methods. Do not call texture/color setters on a posed mesh view: that bypasses source data and GPU invalidation. There is no rig copy constructor in this API: construct each character's rig separately from the source parts. Installation copies those parts, giving each rig independent pose state.
 
 ## MAHumanoidRig — 17 body parts
 
@@ -131,6 +135,8 @@ Treat returned meshes as rig-owned views. Change parts through `setPart()`/`repl
 MAHumanoidRig();                          // Define the humanoid hierarchy without geometry; type is 1.
 MAHumanoidRig(Map<String, MAMesh> parts);  // Define the hierarchy and install supplied parts.
 MAHumanoidRig setColor(int r, int g, int b, int a); // Recolor all parts; fluent humanoid return.
+MAHumanoidRig setColor(String name, int r, int g, int b, int a);
+MAHumanoidRig setTexture(String name, Texture texture);
 ```
 
 Inherits the full `MARig` API. Each name below is also a public `MAMesh` field, refreshed after rig updates. Treat those fields as read-only views; use `setPart()` to replace geometry.
@@ -218,42 +224,113 @@ This requires at least one keyframe. For one-shot playback, use `Math.min(elapse
 ## MAGpuRig — GPU rendering
 
 ```java
-MAGpuRig(MARig rig, Texture texture);  // Upload combined parts after InitWindow(); borrow the texture.
-MAGpuRig setColor(int r, int g, int b, int a); // Renderer-only tint; white restores the original look.
-void draw();                          // Update/upload changed data, then issue one DrawMesh().
-void draw(float x, float y, float z);   // Add a draw-only world offset without changing the rig.
-void close();                         // Release owned mesh/material; safe to call repeatedly.
+MAGpuRig(MARig rig, Texture fallback);                  // ORDERED per-part textures, with a shared fallback.
+MAGpuRig(MARig rig, Texture fallback, MAGpuRig.TextureMode mode);
+MAGpuRig textureMode(MAGpuRig.TextureMode mode);         // Rebuild batches on the next draw if changed.
+MAGpuRig.TextureMode textureMode();
+MAGpuRig setColor(int r, int g, int b, int a);           // Global renderer tint; no vertex upload.
+MAGpuRig setColor(String name, int r, int g, int b, int a); // Renderer-only part tint; updates colors only.
+MAGpuRig clearColor(String name);                       // Remove that renderer's part tint.
+void draw();                                           // Update changed data; DrawMesh per texture batch.
+void draw(float x, float y, float z);                    // Extra world offset, reusing the same uploaded pose.
+void close();                                          // Free owned buffers/material; never unload textures.
 ```
 
-Implements `AutoCloseable`. Create, draw, and close on the graphics thread. Draw inside `BeginMode3D()` and **outside** `rlBegin()`/`rlEnd()`. `setParts()` and `replace()` automatically invalidate uploaded geometry; the next draw rebuilds buffers. Pose changes stream positions into the existing buffer once; repeated offset draws reuse that upload. UVs stay static. Rig recoloring updates the color buffer; renderer tint changes only the material color.
+Create, draw, and close on the graphics thread. Draw inside `BeginMode3D()` and **outside** `rlBegin()`/`rlEnd()`. All textures are **borrowed**: close renderers before unloading textures or closing the window. Multiple renderers may share a rig and textures. A mesh copy, mirror, transform, and rig installation preserve its texture reference; they do not duplicate the GPU texture.
 
-The renderer borrows the supplied texture. Close the renderer **before** unloading that texture or closing the window. Multiple offset draws reuse one pose; use separate rigs for separately animated characters. The renderer keeps the standard DrawMesh/UpdateMeshBuffer path available on OpenGL 2.1; it requires no instancing or custom shaders. The default material is unlit, so no unused normal buffer is uploaded. Rendering was exercised here on Mesa OpenGL 4.5; the OpenGL 2.1 native build and your hardware still need a local run.
+### Optional per-part textures
+
+```java
+// Load textures once, after InitWindow(). Attach references before installing parts.
+MAMesh hand = MAIO.loadMAMesh("assets/rightHand.mamesh").texture(handTex);
+body.setPart("rightHand", hand);
+MAGpuRig gpu = new MAGpuRig(body, bodyTex); // All other untextured parts use bodyTex.
+
+// Change an already installed part without replacing its geometry:
+body.setTexture("rightHand", alternateHandTex);
+body.setTexture("rightHand", null);       // Return to this renderer's fallback.
+```
+
+You can also pass a texture to `new MAMesh(triangles, pivot, texture)`. Both the constructor argument and `.texture(...)` are optional. Texture selection belongs to the mesh, so no parallel `Vector<Texture>` or joint-to-texture map needs to stay synchronized. If you replace a part, the replacement brings its own texture. `setTexture` requires an installed part, including one hidden by a missing ancestor.
+
+| Mode | Behavior | Use |
+| --- | --- | --- |
+| `ORDERED` (default) | Merge adjacent parts sharing an effective texture, preserving original joint/triangle order. | Safe default, including transparent textures/effects. |
+| `BATCHED` | Group all parts by texture ID, preserving first texture encounter order. | Opaque parts, or any scene where reordering is known safe. |
+| `SINGLE` | Ignore per-part texture references; use the renderer's fallback for everything. | Force one shared texture/atlas and one batch. |
+
+```java
+gpu.textureMode(MAGpuRig.TextureMode.BATCHED); // Explicit opt-in to reordering.
+gpu.textureMode(MAGpuRig.TextureMode.SINGLE);  // Ignore overrides for this renderer only.
+gpu.textureMode(MAGpuRig.TextureMode.ORDERED);// Restore per-part textures without reordering.
+```
+
+`ORDERED` already produces **one DrawMesh call** when all visible parts resolve to the same texture. There is no per-frame texture-map lookup or per-part texture scan. Geometry, effective texture assignments, and mode changes rebuild buffers on the next draw; normal animation streams positions into existing buffers, and repeated offset draws reuse that upload. `SINGLE` ignores texture-only edits without rebuilding. Switching back to a part-texture mode picks up the current assignments.
+
+`BATCHED` does not inspect texture pixels or sort transparency. Use `ORDERED` for alpha-blended effects, including effects made transparent by color/tint. ORDERED preserves the original order; it does not automatically depth-sort transparent surfaces. UVs and texture dimensions are unchanged; parts must have UVs appropriate to their textures. Texture IDs are grouped, so different Java wrappers for the same live GPU texture can share a batch. Do not mutate a bound Texture descriptor or unload/reload its ID behind a rig; use `setTexture` with the replacement resource.
+
+Textures are runtime resources: `.mamesh`, `.marig`, pose, and animation formats remain unchanged and do **not** serialize texture handles or paths. Reassign textures after loading. The existing `.mamesh` format also loads vertex colors as white; set custom colors after loading as before. GLB import retains its existing `MAIO.texture()` output; opt in with `importedMesh.texture(MAIO.texture())` when needed.
+
+### Falcon punch: attached mesh, separate texture, GPU rendering
+
+```java
+// Initialize once. The hand asset needs child point 0 at the effect's attachment frame.
+MAMesh falcon = MAIO.loadMAMesh("assets/falcon.mamesh").texture(falconTex);
+body.define("punchFX", "rightHand", 0);
+MAGpuRig gpu = new MAGpuRig(body, bodyTex);
+
+// On entering the effect's active window:
+body.setPart("punchFX", falcon);
+
+// Each frame, after queueing animation:
+gpu.draw(drawX, drawY, drawZ); // Falcon follows the hand and uses falconTex.
+
+// On leaving the active window, or interruption:
+body.setPart("punchFX", null);
+```
+
+No separate tracking rig is needed. Do not call `setPart` every frame: installation/removal changes geometry and triggers a buffer rebuild on the next draw. For an independently drawn effect that is shown/hidden very frequently, a persistent separate rig remains an option to avoid those transition rebuilds.
 
 ### Colors and transparent trails
 
-RGBA channels use integers `0..255` (other values wrap to a byte, as in `MAMesh.setColor`).
+RGBA integers use `0..255`; other values wrap to a byte, as in `MAMesh.setColor`. Authored per-mesh/per-vertex colors work by default and do not require extra draw calls.
 
 ```java
-humanoid.setColor(255, 120, 40, 255); // Replace all installed parts' vertex colors.
-// The color survives pose changes, hidden descendants, and future part replacements.
+body.setColor("rightHand", 255, 120, 40, 255); // Replace one joint's vertex RGBA.
+body.setColor(255, 255, 255, 255);             // Replace all RGBA, clearing per-joint overrides.
 
-// Use a separate MAGpuRig for trails; it may share the animated humanoid.
-trailGpu.setColor(80, 180, 255, 80);  // Multiply vertex/texture RGBA by a renderer-only tint.
+gpu.setColor("rightHand", 255, 80, 80, 255);  // Part tint on THIS renderer only.
+gpu.clearColor("rightHand");                 // Restore that part's untinted vertex colors.
+trailGpu.setColor(80, 180, 255, 80);           // Multiply all parts by a global renderer tint.
 trailGpu.draw(-2f, 0f, 0f);
-gpu.draw();                         // Its material tint is independent of trailGpu.
-trailGpu.setColor(255,255,255,255);  // Reset this renderer's tint.
+trailGpu.setColor(255, 255, 255, 255);         // Reset global tint; per-part tints remain.
 ```
 
-`MAGpuRig.setColor` does not modify the humanoid or any other renderer and does not upload vertex data. `MARig.setColor` replaces source vertex colors, matching `MAMesh.setColor`; setting it to white does not restore previously authored per-vertex colors. Colors are not included in pose/animation files. Both color methods return the same object.
+| Operation | Meaning | Lifetime / update cost |
+| --- | --- | --- |
+| `sourceMesh.setColor(r,g,b,a)` | Replace that source mesh's vertex colors; not its descendants. | Install with `setPart`; copied along with geometry. |
+| `rig.setColor(name,r,g,b,a)` | Replace one joint's vertex colors. | Survives animation, hiding, removal and replacement; color-buffer update only. |
+| `rig.setColor(r,g,b,a)` | Replace all vertex colors; clear per-joint overrides. | Also applies to future installed parts; color-buffer update only. |
+| `gpu.setColor(name,r,g,b,a)` | Multiply one joint's vertex colors for this renderer. | Survives part replacement; color-buffer update only; `clearColor(name)` removes it. |
+| `gpu.setColor(r,g,b,a)` | Global material tint, multiplied with vertex colors and any part tint. | No vertex upload; independent across renderers. |
+
+A later per-joint rig color overrides the rig-wide color for that joint; a later whole-rig color resets all joint overrides. Recoloring source vertices is destructive: setting them to white does not restore their old authored colors. Renderer tints are reversible and do not modify the rig or other renderers. Integer per-part tint multiplication rounds down to a byte; final RGBA also includes texture color and global material tint. Part tinting is skipped entirely when no renderer part tints exist, and colors are not recomputed on ordinary pose updates.
+
+The renderer uses the existing unlit DrawMesh/UpdateMeshBuffer path, with no instancing, texture arrays, custom shaders, or new dependencies. CPU posing remains on the CPU; GPU buffers handle rendering. See [PERFORMANCE.md](PERFORMANCE.md) for the measured limits.
 
 ## MAMesh — geometry and attachments
 
 ```java
 MAMesh(Vector<MATri> tris, MAPivot pivotPoint); // Use supplied triangle vector and non-null pivot by reference.
-MAMesh(MAMesh other);                         // Deep-copy triangles, pivots, and descendants.
+MAMesh(Vector<MATri> tris, MAPivot pivotPoint, Texture texture); // Optional borrowed texture.
+MAMesh(MAMesh other);                         // Deep-copy geometry/frames; share texture references.
+Texture texture();                           // Null means renderer fallback.
+MAMesh texture(Texture texture);             // Set source mesh texture; null clears it.
 
 void draw();                                 // Submit this mesh and descendants inside an rlgl triangle block.
 void draw(float x, float y, float z);          // Submit with an extra offset; vertices remain unchanged.
+void drawTextured(Texture fallback);          // Honor each mesh's texture; outside rlBegin/rlEnd.
+void drawTextured(Texture fallback, float x, float y, float z);
 MAMesh setColor(int r, int g, int b, int a);  // Set this mesh's vertex colors; does not recolor descendants.
 
 MAPivot pivotPoint();                        // Get the root attachment frame by reference.
@@ -485,7 +562,7 @@ rlSetTexture(0);
 EndMode3D();
 ```
 
-Use this block in place of `renderer.draw()` when using the immediate path. `MAGpuRig.draw()` manages its own mesh drawing and must stay outside that block.
+Use this block in place of `renderer.draw()` for the legacy immediate path. It keeps your caller-selected texture and ignores per-mesh texture references, preserving existing behavior and overhead. To honor per-mesh textures through rlgl, use `humanoid.drawTextured(texture)` or `mesh.drawTextured(texture)` instead, outside any `rlBegin`/`rlEnd` block. These helpers manage their own texture switches/triangle blocks. `MAGpuRig.draw()` must also stay outside that block.
 
 ## Quick recipes
 
@@ -571,14 +648,14 @@ rem Windows
 build.bat C:\path\to\your\jaylib.jar
 ```
 
-Output: `lib/MechaAmazing.jar`. Replace your old MA JAR with this one; keep your existing Jaylib/native dependencies. Do not keep two MA JARs on the same classpath. `src/Main.java` is the original asset-dependent demo and is not included in the library JAR. Its assets are not present in the upstream repository.
+Output: `lib/MechaAmazing.jar`, also copied to the repository-root `MechaAmazing.jar`. Replace your old MA JAR with this one; keep your existing Jaylib/native dependencies. Do not keep two MA JARs on the same classpath. `src/Main.java` is the original asset-dependent demo and is not included in the library JAR. Its assets are not present in the upstream repository.
 
 ## Optimization and compatibility
 
-- The GPU path combines visible parts into one draw call, in the original joint and triangle order. A 17-part humanoid needs one DrawMesh call instead of 17. Repeated offsets reuse uploaded positions.
+- Shared-texture rigs still use one DrawMesh call, with original joint/triangle order. Optional part textures use ordered runs or explicit texture batching. Repeated offsets reuse uploaded positions.
 - CPU posing updates only changed joints and descendants. Whole-rig movement still updates the whole model. Public meshes and humanoid fields remain current after `update()`.
 - Pivot normalization no longer allocates temporary quaternion arrays.
-- Existing public/protected API signatures, packages, CPU draw blocks, file formats, joint names and texture ownership are preserved. `setColor` is additive.
+- Existing public/protected API signatures, packages, CPU draw blocks, file formats, joint names and texture ownership are preserved. Per-part texture/color APIs and textured rlgl draw helpers are additive.
 - Combined rendering streams positions for changed poses. Very dense rigs trade some upload bandwidth for fewer draw calls; gains depend on geometry, draw count and hardware.
 
-See [PERFORMANCE.md](PERFORMANCE.md) for measured results and limits, and [tests/README.md](tests/README.md) for the reproducible compatibility, rendering, color and benchmark checks. These are measured synthetic workloads, not a promise of doubled game FPS.
+See [PERFORMANCE.md](PERFORMANCE.md) for measured results and limits, and [tests/README.md](tests/README.md) for the reproducible compatibility, rendering, color and benchmark checks. These are synthetic workloads, not a hardware FPS guarantee.

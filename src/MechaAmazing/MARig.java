@@ -1,6 +1,7 @@
 package MechaAmazing;
 
 import java.util.*;
+import com.raylib.Raylib.Texture;
 
 /** Named joints with independent rest meshes and local animation rotations.
  * Queue rotations, then update() once per frame. All angles are radians.
@@ -15,6 +16,7 @@ public class MARig {
         private final Joint parentJoint;
         private boolean dirty=true, changed;
         private MAMesh rest, current, cachedRest, posed;
+        private int[] colorOverride;
         private final float[] transform=new float[12],frame=new float[4],delta=new float[4],scratch=new float[4];
         private MAVert[] sourceVertices,outputVertices;
         private float[] rotation={0,0,0,1};
@@ -35,7 +37,7 @@ public class MARig {
     private boolean uniformColor;
     private int colorR=255,colorG=255,colorB=255,colorA=255;
     private long poseVersion,colorVersion;
-    private long geometryVersion;
+    private long geometryVersion,textureVersion;
     private Joint[] ordered=new Joint[0];
 
     /** Define parents before children. Connector is an index into the parent's childPoints. */
@@ -67,7 +69,8 @@ public class MARig {
                 if(m.pivotPoint()==null || !m.children.isEmpty())
                     throw new IllegalArgumentException("Install an unassembled part with a pivot: "+j.name);
                 m=new MAMesh(m);
-                if(uniformColor)m.setColor(colorR,colorG,colorB,colorA);
+                if(j.colorOverride!=null){int[] c=j.colorOverride;m.setColor(c[0],c[1],c[2],c[3]);}
+                else if(uniformColor)m.setColor(colorR,colorG,colorB,colorA);
                 MAMeshMath.orientation(m.pivotPoint());
                 for(MAPivot p:m.childPoints) MAMeshMath.orientation(p);
             }
@@ -192,14 +195,37 @@ public class MARig {
     public MARig setColor(int r,int g,int b,int a){
         colorR=r&255;colorG=g&255;colorB=b&255;colorA=a&255;uniformColor=true;
         for(Joint j:ordered){
+            j.colorOverride=null;
             if(j.rest!=null)j.rest.setColor(colorR,colorG,colorB,colorA);
             if(j.posed!=null)j.posed.setColor(colorR,colorG,colorB,colorA);
         }
         colorVersion++;return this;
     }
+    /** Recolor one joint, including future replacements; a later whole-rig setColor resets overrides. */
+    public MARig setColor(String name,int r,int g,int b,int a){
+        Joint j=joint(name);
+        j.colorOverride=new int[]{r&255,g&255,b&255,a&255};
+        if(j.rest!=null)j.rest.setColor(r,g,b,a);
+        if(j.posed!=null)j.posed.setColor(r,g,b,a);
+        colorVersion++;return this;
+    }
+    /** Set an installed part's borrowed texture; null restores the renderer's fallback.
+     * Replacing the part uses the replacement mesh's own texture.
+     */
+    public MARig setTexture(String name,Texture texture){
+        Joint j=joint(name);
+        if(j.rest==null)throw new IllegalStateException("Part is not installed: "+name);
+        if(j.rest.texture()!=texture){
+            j.rest.texture(texture);
+            if(j.posed!=null)j.posed.texture(texture);
+            textureVersion++;
+        }
+        return this;
+    }
     long poseVersion(){return poseVersion;}
     long colorVersion(){return colorVersion;}
     long geometryVersion(){return geometryVersion;}
+    long textureVersion(){return textureVersion;}
     MAMesh restMesh(String name){return joint(name).rest;}
     float[] partTransform(String name){return joint(name).transform;}
     protected void onUpdated(){}
@@ -214,5 +240,12 @@ public class MARig {
     public void draw(float x,float y,float z){
         if(!Float.isFinite(x)||!Float.isFinite(y)||!Float.isFinite(z))throw new IllegalArgumentException("Invalid draw offset");
         update();if(root!=null)root.draw(x,y,z);
+    }
+    /** Per-part textures through rlgl; call outside rlBegin/rlEnd, inside BeginMode3D. */
+    public void drawTextured(Texture fallback){drawTextured(fallback,0f,0f,0f);}
+    public void drawTextured(Texture fallback,float x,float y,float z){
+        Objects.requireNonNull(fallback,"fallback");
+        if(!Float.isFinite(x)||!Float.isFinite(y)||!Float.isFinite(z))throw new IllegalArgumentException("Invalid draw offset");
+        update();if(root!=null)root.drawTextured(fallback,x,y,z);
     }
 }

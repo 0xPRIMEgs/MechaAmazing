@@ -10,6 +10,7 @@ public class MAMesh{
 	Vector<MATri> tris = new Vector<MATri>();
 	
 	MAPivot pivotPoint;
+	private Raylib.Texture texture;
 	Vector<MAPivot> childPoints = new Vector<MAPivot>();
 	Vector<MAMesh> children = new Vector<MAMesh>();
 	
@@ -43,8 +44,19 @@ public class MAMesh{
 		this.tris = tris;
 		this.pivotPoint = java.util.Objects.requireNonNull(pivotPoint, "pivotPoint");
 	}
+
+	/** Optional borrowed texture; null uses the renderer's fallback. */
+	public MAMesh(Vector<MATri> tris, MAPivot pivotPoint, Raylib.Texture texture){
+		this(tris, pivotPoint);
+		this.texture = texture;
+	}
+
+	public Raylib.Texture texture(){ return texture; }
+	/** For an installed rig part, use MARig.setTexture(name, texture) instead. */
+	public MAMesh texture(Raylib.Texture texture){ this.texture = texture; return this; }
 	
 	public MAMesh(MAMesh other){
+		this.texture = other.texture;
 		this.childIndex = other.childIndex;
 		
 		this.scaleX = other.scaleX;
@@ -101,6 +113,28 @@ public class MAMesh{
 		for(MAMesh child : this.children){
 			child.draw(x, y, z);
 		}
+	}
+
+	/** Draw with per-mesh textures outside rlBegin/rlEnd; textures are never unloaded. */
+	public void drawTextured(Raylib.Texture fallback){ drawTextured(fallback, 0f, 0f, 0f); }
+	public void drawTextured(Raylib.Texture fallback, float x, float y, float z){
+		java.util.Objects.requireNonNull(fallback, "fallback");
+		if(!Float.isFinite(x)||!Float.isFinite(y)||!Float.isFinite(z))
+			throw new IllegalArgumentException("Invalid draw offset");
+		try { drawTexturedParts(fallback.id(), x, y, z, rlGetVersion() == 1); }
+		finally { rlSetTexture(0); }
+	}
+	private void drawTexturedParts(int fallback, float x, float y, float z, boolean legacy){
+		if(!tris.isEmpty()){
+			int id = texture == null ? fallback : texture.id();
+			rlSetTexture(id);
+			rlBegin(RL_TRIANGLES);
+			// A new rlgl draw slot can reset mode/texture; GL 1.1 binds only before glBegin.
+			if(!legacy) rlSetTexture(id);
+			try { for(MATri tri : tris) tri.draw(x, y, z); }
+			finally { rlEnd(); }
+		}
+		for(MAMesh child : children) child.drawTexturedParts(fallback, x, y, z, legacy);
 	}
 
 	public MAMesh setColor(int r, int g, int b, int a){
