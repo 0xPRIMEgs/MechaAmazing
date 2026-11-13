@@ -32,6 +32,7 @@ public class MAHumanoidRig extends MARig {
         define("rightFoot","rightCalf",0);
     }
     public MAHumanoidRig(Map<String,MAMesh> parts){this();setParts(parts);}
+    @Override public MAHumanoidRig setColor(int r,int g,int b,int a){super.setColor(r,g,b,a);return this;}
     @Override protected void onUpdated(){
         groin=mesh("groin");
         abs=mesh("abs");

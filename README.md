@@ -12,7 +12,7 @@ A quick reference for MechaAmazing's public Java API, arranged by class with sho
 
 MechaAmazing builds articulated models from triangle meshes, pivot frames, and named joints. Pose and animation data are separate from geometry, so compatible rigs can share animations.
 
-**API reference:** `MechaAmazing(7).zip` and `MechaAmazing(4).jar`, November 10, 2026. The supplied JAR targets Java 17 bytecode; your raylib binding and native dependencies must also be compatible with your Java runtime. Rendering uses `com.raylib.Raylib` and JavaCPP. These dependencies are not bundled in the MechaAmazing JAR.
+**API reference:** optimized source based on GitHub commit `679a2f918bc1f2a5b7f368aff51f06c8a69ba588`, November 13, 2026. The supplied JAR targets Java 17 bytecode; your raylib binding and native dependencies must also be compatible with your Java runtime. Rendering uses `com.raylib.Raylib` and JavaCPP. These dependencies are not bundled in the MechaAmazing JAR.
 
 ```java
 import MechaAmazing.*;
@@ -30,7 +30,7 @@ import java.util.Vector;
 | [MAHumanoidRig](#mahumanoidrig--17-body-parts) | A predefined 17-part humanoid hierarchy. |
 | [MAPose](#mapose--joint-transform-snapshots) | Capture, apply, and blend a set of joint transforms. |
 | [MAAnimation](#maanimation--keyframes-and-playback) | Store, edit, and sample timed poses. |
-| [MAGpuRig](#magpurig--gpu-rendering) | Draw rigid parts with static GPU vertex buffers. |
+| [MAGpuRig](#magpurig--gpu-rendering) | Draw a posed rig in one GPU call; reuse uploads across offset draws. |
 | [MAMesh](#mamesh--geometry-and-attachments) | Store triangles, a root pivot, connectors, and child meshes. |
 | [MAMeshMath](#mameshmath--transforms-and-quaternions) | Transform copies of meshes and work with quaternions. |
 | [MAPivot](#mapivot--attachment-frames) | Store an attachment position and orientation. |
@@ -102,7 +102,8 @@ MARig orientation(float rx, float ry, float rz);                   // Set whole-
 MARig motionUnit(float unit);                                    // Set positive world length per pose translation unit.
 float motionUnit();                                              // Read that length; default is 1.
 MARig resetPose();                                               // Reset all local rotations/offsets and update.
-MARig update();                                                  // Rebuild posed geometry only when dirty.
+MARig update();                                                  // Update changed joints and their descendants.
+MARig setColor(int r, int g, int b, int a);                       // Replace every part's RGBA; persistent across animation/replacement.
 
 void draw();                                                     // Submit the current rig through rlgl.
 void draw(float x, float y, float z);                              // Draw with an extra world offset; does not move the rig.
@@ -129,6 +130,7 @@ Treat returned meshes as rig-owned views. Change parts through `setPart()`/`repl
 ```java
 MAHumanoidRig();                          // Define the humanoid hierarchy without geometry; type is 1.
 MAHumanoidRig(Map<String, MAMesh> parts);  // Define the hierarchy and install supplied parts.
+MAHumanoidRig setColor(int r, int g, int b, int a); // Recolor all parts; fluent humanoid return.
 ```
 
 Inherits the full `MARig` API. Each name below is also a public `MAMesh` field, refreshed after rig updates. Treat those fields as read-only views; use `setPart()` to replace geometry.
@@ -216,15 +218,33 @@ This requires at least one keyframe. For one-shot playback, use `Math.min(elapse
 ## MAGpuRig — GPU rendering
 
 ```java
-MAGpuRig(MARig rig, Texture texture);  // Upload rigid parts after InitWindow(); borrow the texture.
-void draw();                          // Update the rig, then draw parts with raylib DrawMesh().
+MAGpuRig(MARig rig, Texture texture);  // Upload combined parts after InitWindow(); borrow the texture.
+MAGpuRig setColor(int r, int g, int b, int a); // Renderer-only tint; white restores the original look.
+void draw();                          // Update/upload changed data, then issue one DrawMesh().
 void draw(float x, float y, float z);   // Add a draw-only world offset without changing the rig.
-void close();                         // Release owned meshes/material; safe to call repeatedly.
+void close();                         // Release owned mesh/material; safe to call repeatedly.
 ```
 
-Implements `AutoCloseable`. Create, draw, and close on the graphics thread. Draw inside `BeginMode3D()` and **outside** `rlBegin()`/`rlEnd()`. `setParts()` and `replace()` automatically invalidate uploaded geometry; the next draw rebuilds buffers. Joint pose changes reuse the uploaded geometry.
+Implements `AutoCloseable`. Create, draw, and close on the graphics thread. Draw inside `BeginMode3D()` and **outside** `rlBegin()`/`rlEnd()`. `setParts()` and `replace()` automatically invalidate uploaded geometry; the next draw rebuilds buffers. Pose changes stream positions into the existing buffer once; repeated offset draws reuse that upload. UVs stay static. Rig recoloring updates the color buffer; renderer tint changes only the material color.
 
-The renderer borrows the supplied texture. Close the renderer **before** unloading that texture or closing the window. Multiple offset draws reuse one pose; use separate rigs for separately animated characters. The standard DrawMesh path also supports OpenGL 2.1.
+The renderer borrows the supplied texture. Close the renderer **before** unloading that texture or closing the window. Multiple offset draws reuse one pose; use separate rigs for separately animated characters. The renderer keeps the standard DrawMesh/UpdateMeshBuffer path available on OpenGL 2.1; it requires no instancing or custom shaders. The default material is unlit, so no unused normal buffer is uploaded. Rendering was exercised here on Mesa OpenGL 4.5; the OpenGL 2.1 native build and your hardware still need a local run.
+
+### Colors and transparent trails
+
+RGBA channels use integers `0..255` (other values wrap to a byte, as in `MAMesh.setColor`).
+
+```java
+humanoid.setColor(255, 120, 40, 255); // Replace all installed parts' vertex colors.
+// The color survives pose changes, hidden descendants, and future part replacements.
+
+// Use a separate MAGpuRig for trails; it may share the animated humanoid.
+trailGpu.setColor(80, 180, 255, 80);  // Multiply vertex/texture RGBA by a renderer-only tint.
+trailGpu.draw(-2f, 0f, 0f);
+gpu.draw();                         // Its material tint is independent of trailGpu.
+trailGpu.setColor(255,255,255,255);  // Reset this renderer's tint.
+```
+
+`MAGpuRig.setColor` does not modify the humanoid or any other renderer and does not upload vertex data. `MARig.setColor` replaces source vertex colors, matching `MAMesh.setColor`; setting it to white does not restore previously authored per-vertex colors. Colors are not included in pose/animation files. Both color methods return the same object.
 
 ## MAMesh — geometry and attachments
 
@@ -535,3 +555,30 @@ MAMesh child = MAIO.loadMAMesh("assets/weapon.mamesh");
 MAMesh attached = parent.attachAsChild(child, 0); // Requires parent connector 0.
 // parent.draw() now also draws the attached copy.
 ```
+
+
+## Build the library
+
+Use JDK 17 or later and your existing JavaCPP-based Jaylib binding. The library keeps package `MechaAmazing`, targets Java 17 bytecode, and does not bundle Jaylib/native libraries.
+
+```sh
+# Linux / macOS; optionally set JAVA_HOME to your JDK.
+./build.sh /path/to/your/jaylib.jar
+```
+
+```bat
+rem Windows
+build.bat C:\path\to\your\jaylib.jar
+```
+
+Output: `lib/MechaAmazing.jar`. Replace your old MA JAR with this one; keep your existing Jaylib/native dependencies. Do not keep two MA JARs on the same classpath. `src/Main.java` is the original asset-dependent demo and is not included in the library JAR. Its assets are not present in the upstream repository.
+
+## Optimization and compatibility
+
+- The GPU path combines visible parts into one draw call, in the original joint and triangle order. A 17-part humanoid needs one DrawMesh call instead of 17. Repeated offsets reuse uploaded positions.
+- CPU posing updates only changed joints and descendants. Whole-rig movement still updates the whole model. Public meshes and humanoid fields remain current after `update()`.
+- Pivot normalization no longer allocates temporary quaternion arrays.
+- Existing public/protected API signatures, packages, CPU draw blocks, file formats, joint names and texture ownership are preserved. `setColor` is additive.
+- Combined rendering streams positions for changed poses. Very dense rigs trade some upload bandwidth for fewer draw calls; gains depend on geometry, draw count and hardware.
+
+See [PERFORMANCE.md](PERFORMANCE.md) for measured results and limits, and [tests/README.md](tests/README.md) for the reproducible compatibility, rendering, color and benchmark checks. These are measured synthetic workloads, not a promise of doubled game FPS.

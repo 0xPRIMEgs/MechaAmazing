@@ -49,8 +49,9 @@ public class MAPivot{
 	public MAPivot z(float f){ this.z = f; return this; }
 
     public MAPivot rotation(float x, float y, float z, float w) {
-        float[] q=MAMeshMath.normalized(new float[]{x,y,z,w});
-        qx=q[0]; qy=q[1]; qz=q[2]; qw=q[3]; return this;
+        double n=Math.sqrt((double)x*x+(double)y*y+(double)z*z+(double)w*w);
+        if(!Double.isFinite(n)||n==0)throw new IllegalArgumentException("Invalid quaternion.");
+        qx=(float)(x/n);qy=(float)(y/n);qz=(float)(z/n);qw=(float)(w/n);return this;
     }
 
     /** Set frame orientation: Rz(z) * Ry(y) * Rx(x), radians. */
