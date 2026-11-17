@@ -12,7 +12,7 @@ A quick reference for MechaAmazing's public Java API, arranged by class with sho
 
 MechaAmazing builds articulated models from triangle meshes, pivot frames, and named joints. Pose and animation data are separate from geometry, so compatible rigs can share animations.
 
-**API reference:** optional per-part materials based on GitHub commit `a373607ae016f357284658d45130a7d400bfbdee`, November 13, 2026. The supplied JAR targets Java 17 bytecode; your raylib binding and native dependencies must also be compatible with your Java runtime. Rendering uses `com.raylib.Raylib` and JavaCPP. These dependencies are not bundled in the MechaAmazing JAR.
+**API reference:** includes live shared-texture switching, November 16, 2026, based on GitHub commit `a199d52`. The supplied JAR targets Java 17 bytecode; your raylib binding and native dependencies must also be compatible with your Java runtime. Rendering uses `com.raylib.Raylib` and JavaCPP. These dependencies are not bundled in the MechaAmazing JAR.
 
 ```java
 import MechaAmazing.*;
@@ -224,8 +224,10 @@ This requires at least one keyframe. For one-shot playback, use `Math.min(elapse
 ## MAGpuRig — GPU rendering
 
 ```java
+MAGpuRig(MARig rig);                                    // ORDERED, using raylib's white fallback texture.
 MAGpuRig(MARig rig, Texture fallback);                  // ORDERED per-part textures, with a shared fallback.
 MAGpuRig(MARig rig, Texture fallback, MAGpuRig.TextureMode mode);
+MAGpuRig setTexture(Texture t);                         // Change shared fallback; no mesh rebuild/upload. Null = white.
 MAGpuRig textureMode(MAGpuRig.TextureMode mode);         // Rebuild batches on the next draw if changed.
 MAGpuRig.TextureMode textureMode();
 MAGpuRig setColor(int r, int g, int b, int a);           // Global renderer tint; no vertex upload.
@@ -237,6 +239,29 @@ void close();                                          // Free owned buffers/mat
 ```
 
 Create, draw, and close on the graphics thread. Draw inside `BeginMode3D()` and **outside** `rlBegin()`/`rlEnd()`. All textures are **borrowed**: close renderers before unloading textures or closing the window. Multiple renderers may share a rig and textures. A mesh copy, mirror, transform, and rig installation preserve its texture reference; they do not duplicate the GPU texture.
+
+### Changing the shared texture
+
+```java
+MAGpuRig gpu = new MAGpuRig(body); // Can draw immediately with white + vertex colors.
+gpu.setTexture(bodyTex);
+gpu.draw();
+gpu.setTexture(alternateBodyTex); // Reuses the same GPU mesh buffers.
+gpu.draw();
+gpu.setTexture(null);             // Restore raylib's white texture.
+```
+
+`setTexture` changes this renderer's shared fallback, the same texture supplied to
+the existing constructors. In `ORDERED`/`BATCHED`, explicit part textures keep their
+own images. Use `SINGLE` to apply the shared texture to every part. Constructors
+also accept `null` for the white fallback. The default white texture is borrowed
+from raylib; the renderer allocates no new GPU texture for it.
+
+The setter changes only the material texture/reference. It never rebuilds batches
+or uploads positions, UVs, or colors. Normal animation and geometry edits still
+perform their usual updates. Load replacement textures once and reuse them; the
+setter does not load or unload textures. UVs are unchanged, so alternate skins
+should use the same layout.
 
 ### Optional per-part textures
 
@@ -255,8 +280,8 @@ You can also pass a texture to `new MAMesh(triangles, pivot, texture)`. Both the
 
 | Mode | Behavior | Use |
 | --- | --- | --- |
-| `ORDERED` (default) | Merge adjacent parts sharing an effective texture, preserving original joint/triangle order. | Safe default, including transparent textures/effects. |
-| `BATCHED` | Group all parts by texture ID, preserving first texture encounter order. | Opaque parts, or any scene where reordering is known safe. |
+| `ORDERED` (default) | Merge adjacent fallback users or adjacent explicit textures with the same ID, preserving original joint/triangle order. | Safe default, including transparent textures/effects. |
+| `BATCHED` | One fallback group plus groups by explicit texture ID, preserving first group encounter order. | Opaque parts, or any scene where reordering is known safe. |
 | `SINGLE` | Ignore per-part texture references; use the renderer's fallback for everything. | Force one shared texture/atlas and one batch. |
 
 ```java
@@ -265,7 +290,7 @@ gpu.textureMode(MAGpuRig.TextureMode.SINGLE);  // Ignore overrides for this rend
 gpu.textureMode(MAGpuRig.TextureMode.ORDERED);// Restore per-part textures without reordering.
 ```
 
-`ORDERED` already produces **one DrawMesh call** when all visible parts resolve to the same texture. There is no per-frame texture-map lookup or per-part texture scan. Geometry, effective texture assignments, and mode changes rebuild buffers on the next draw; normal animation streams positions into existing buffers, and repeated offset draws reuse that upload. `SINGLE` ignores texture-only edits without rebuilding. Switching back to a part-texture mode picks up the current assignments.
+`ORDERED` produces **one DrawMesh call** when all visible parts use the shared fallback, or all use explicit textures with the same ID. Fallback users stay separate from explicit textures even when their IDs currently match; this allows `gpu.setTexture(...)` to change only the fallback without splitting or rebuilding a mesh later. Mixed fallback/explicit parts may therefore use extra draw calls. There is no per-frame texture-map lookup or per-part texture scan. Geometry, per-part texture assignments, and mode changes rebuild buffers on the next draw; normal animation streams positions into existing buffers, and repeated offset draws reuse that upload. `gpu.setTexture(...)` never triggers a rebuild. `SINGLE` also ignores per-part texture-only edits without rebuilding. Switching back to a part-texture mode picks up the current assignments.
 
 `BATCHED` does not inspect texture pixels or sort transparency. Use `ORDERED` for alpha-blended effects, including effects made transparent by color/tint. ORDERED preserves the original order; it does not automatically depth-sort transparent surfaces. UVs and texture dimensions are unchanged; parts must have UVs appropriate to their textures. Texture IDs are grouped, so different Java wrappers for the same live GPU texture can share a batch. Do not mutate a bound Texture descriptor or unload/reload its ID behind a rig; use `setTexture` with the replacement resource.
 

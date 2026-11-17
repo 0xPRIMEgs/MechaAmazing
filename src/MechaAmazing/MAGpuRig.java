@@ -11,15 +11,16 @@ import java.util.*;
  */
 public final class MAGpuRig implements AutoCloseable {
  public enum TextureMode {
-  /** Honor part textures; merge adjacent equal textures without changing draw order. */
+  /** Honor part textures; merge adjacent equal texture sources without changing draw order. */
   ORDERED,
-  /** One batch per texture. Opt in only when reordering parts is safe (e.g. opaque parts). */
+  /** One fallback batch plus one per explicit texture. Only for safe reordering (e.g. opaque parts). */
   BATCHED,
   /** Ignore all part textures and use the fallback in one batch. */
   SINGLE
  }
  private final MARig rig;
- private final Texture fallback;
+ private Texture fallback;
+ private Texture defaultTexture;
  private Material material;
  private final Matrix matrix=new Matrix();
  private Batch[] batches=new Batch[0];
@@ -29,14 +30,24 @@ public final class MAGpuRig implements AutoCloseable {
  private long partColorVersion,uploadedPartColorVersion=-1;
  private long geometryVersion=-1,poseVersion=-1,colorVersion=-1,textureVersion=-1;
 
+ /** Use raylib's white texture until setTexture is called; part textures still apply. */
+ public MAGpuRig(MARig rig){this(rig,null,TextureMode.ORDERED);}
  public MAGpuRig(MARig rig,Texture texture){this(rig,texture,TextureMode.ORDERED);}
  public MAGpuRig(MARig rig,Texture texture,TextureMode mode){
   if(!IsWindowReady())throw new IllegalStateException("Create the renderer after InitWindow");
-  this.rig=Objects.requireNonNull(rig,"rig");fallback=Objects.requireNonNull(texture,"texture");
+  this.rig=Objects.requireNonNull(rig,"rig");
   textureMode=Objects.requireNonNull(mode,"mode");
   matrix.m0(1).m4(0).m8(0).m12(0).m1(0).m5(1).m9(0).m13(0)
         .m2(0).m6(0).m10(1).m14(0).m3(0).m7(0).m11(0).m15(1);
-  try{material=LoadMaterialDefault();rig.update();rebuild();}
+  try{
+   material=LoadMaterialDefault();
+   // Copy the descriptor: the material's texture slot is replaced while drawing.
+   Texture white=material.maps().texture();
+   defaultTexture=new Texture().id(white.id()).width(white.width()).height(white.height())
+     .mipmaps(white.mipmaps()).format(white.format());
+   fallback=texture==null?defaultTexture:texture;
+   rig.update();rebuild();
+  }
   catch(RuntimeException|Error e){close();throw e;}
  }
  private static Pointer allocate(int bytes){
@@ -45,6 +56,7 @@ public final class MAGpuRig implements AutoCloseable {
  private void checkOpen(){if(closed)throw new IllegalStateException("Renderer closed");}
 
  private final class Batch implements AutoCloseable {
+  // Null means the renderer's live fallback, not an explicit part texture.
   final Texture texture;
   final List<String> names=new ArrayList<>();
   final List<MAMesh> parts=new ArrayList<>();
@@ -55,6 +67,7 @@ public final class MAGpuRig implements AutoCloseable {
   float[] xyz;
   byte[] rgba;
   Batch(Texture texture){this.texture=texture;}
+  Texture effectiveTexture(){return texture==null?fallback:texture;}
   void upload(){
    List<MAVert> visible=new ArrayList<>();
    for(MAMesh part:parts)for(MATri t:part.tris)Collections.addAll(visible,t.verts);
@@ -105,14 +118,19 @@ public final class MAGpuRig implements AutoCloseable {
   for(String name:rig.names()){
    MAMesh current=rig.mesh(name);
    if(current==null||current.tris.isEmpty())continue;
-   Texture texture=textureMode==TextureMode.SINGLE||current.texture()==null?fallback:current.texture();
+   Texture texture=textureMode==TextureMode.SINGLE?null:current.texture();
+   // Keep fallback users separate from explicit textures, even for equal IDs:
+   // a later setTexture must not change an explicitly textured part.
+   Integer textureId=texture==null?null:texture.id();
    Batch batch;
    if(byTexture!=null){
-    batch=byTexture.get(texture.id());
-    if(batch==null){batch=new Batch(texture);byTexture.put(texture.id(),batch);next.add(batch);}
+    batch=byTexture.get(textureId);
+    if(batch==null){batch=new Batch(texture);byTexture.put(textureId,batch);next.add(batch);}
    }else{
     batch=next.isEmpty()?null:next.get(next.size()-1);
-    if(batch==null||batch.texture.id()!=texture.id()){batch=new Batch(texture);next.add(batch);}
+    if(batch==null||!Objects.equals(batch.texture==null?null:batch.texture.id(),textureId)){
+     batch=new Batch(texture);next.add(batch);
+    }
    }
    batch.names.add(name);batch.parts.add(current);
   }
@@ -121,7 +139,7 @@ public final class MAGpuRig implements AutoCloseable {
   catch(RuntimeException|Error e){for(Batch b:built)b.close();throw e;}
   for(Batch b:batches)b.close();
   batches=built;
-  if(batches.length==1)material.maps().texture(batches[0].texture);
+  if(batches.length==1)material.maps().texture(batches[0].effectiveTexture());
   geometryVersion=rig.geometryVersion();poseVersion=rig.poseVersion();colorVersion=rig.colorVersion();
   textureVersion=rig.textureVersion();uploadedPartColorVersion=partColorVersion;batchesDirty=false;
  }
@@ -131,6 +149,15 @@ public final class MAGpuRig implements AutoCloseable {
   if(textureMode!=mode){textureMode=mode;batchesDirty=true;}return this;
  }
  public TextureMode textureMode(){return textureMode;}
+ /** Set the borrowed shared texture without rebuilding or uploading mesh buffers.
+  * Null restores raylib's white texture. Explicit part textures still apply in
+  * ORDERED/BATCHED mode; SINGLE uses this texture for the whole rig.
+  */
+ public MAGpuRig setTexture(Texture t){
+  checkOpen();fallback=t==null?defaultTexture:t;
+  if(batches.length==1)material.maps().texture(batches[0].effectiveTexture());
+  return this;
+ }
  /** Renderer-only global RGBA multiplier; white restores the untinted appearance. */
  public MAGpuRig setColor(int r,int g,int b,int a){
   checkOpen();material.maps().color().r((byte)r).g((byte)g).b((byte)b).a((byte)a);return this;
@@ -164,7 +191,7 @@ public final class MAGpuRig implements AutoCloseable {
   for(Batch b:batches){
    if(positionsChanged){b.copyPositions();UpdateMeshBuffer(b.mesh,0,b.positions,Math.multiplyExact(b.xyz.length,4),0);}
    if(colorsChanged){b.copyColors();UpdateMeshBuffer(b.mesh,3,b.colors,b.rgba.length,0);}
-   if(batches.length>1)material.maps().texture(b.texture);
+   if(batches.length>1)material.maps().texture(b.effectiveTexture());
    DrawMesh(b.mesh,material,matrix);
   }
   poseVersion=rig.poseVersion();colorVersion=rig.colorVersion();uploadedPartColorVersion=partColorVersion;
@@ -173,5 +200,6 @@ public final class MAGpuRig implements AutoCloseable {
   if(closed)return;closed=true;
   for(Batch b:batches)b.close();batches=new Batch[0];matrix.close();partColors=null;
   if(material!=null){material.maps().texture().id(0);UnloadMaterial(material);material.close();material=null;}
+  if(defaultTexture!=null){defaultTexture.close();defaultTexture=null;}fallback=null;
  }
 }
